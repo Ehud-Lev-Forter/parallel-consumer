@@ -15,6 +15,7 @@ import pl.tlinkowski.unij.api.UniLists;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 import static java.lang.Boolean.TRUE;
@@ -47,6 +48,10 @@ public class WorkManager<K, V> implements ConsumerRebalanceListener {
     // todo make private
     @Getter(PUBLIC)
     private final ShardManager<K, V> sm;
+
+
+    private final AtomicLong lastTimeBatch = new AtomicLong(System.currentTimeMillis());
+
 
     /**
      * The multiple of {@link ParallelConsumerOptions#getMaxConcurrency()} that should be pre-loaded awaiting
@@ -126,9 +131,13 @@ public class WorkManager<K, V> implements ConsumerRebalanceListener {
         if (requestedMaxWorkToRetrieve < 1) {
             return UniLists.of();
         }
-
+        boolean atLeastMinBatchSize = isAtLeastMinBatchSize();
         //
-        var work = sm.getWorkIfAvailable(requestedMaxWorkToRetrieve);
+        var work = sm.getWorkIfAvailable(requestedMaxWorkToRetrieve, atLeastMinBatchSize);
+
+        if (options.isEnforceMinBatch() && work.size() > 0){
+            lastTimeBatch.set(System.currentTimeMillis());
+        }
 
         //
         if (log.isDebugEnabled()) {
@@ -140,6 +149,10 @@ public class WorkManager<K, V> implements ConsumerRebalanceListener {
         }
         numberRecordsOutForProcessing += work.size();
         return work;
+    }
+
+    private boolean isAtLeastMinBatchSize() {
+        return options.isEnforceMinBatch() && lastTimeBatch.get() + options.getMinBatchTimeoutInMillis() > System.currentTimeMillis();
     }
 
     public void onSuccessResult(WorkContainer<K, V> wc) {

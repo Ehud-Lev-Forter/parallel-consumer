@@ -1,7 +1,7 @@
 package io.confluent.parallelconsumer;
 
 /*-
- * Copyright (C) 2020-2022 Confluent, Inc.
+ * Copyright (C) 2020-2023 Confluent, Inc.
  */
 
 import io.confluent.parallelconsumer.internal.AbstractParallelEoSStreamProcessor;
@@ -370,6 +370,30 @@ public class ParallelConsumerOptions<K, V> {
     private final Integer batchSize = 1;
 
     /**
+     The minimum number of batch to pass into the user functions.
+     <p>
+     If the available number of messages is less than {@code minBatchSize}, they will not be processed until more messages
+     arrive or {@code minBatchTimeoutInMillis} has passed.
+     <p>
+     Note that this parameter only takes effect if it is greater than 1 and the {@code minBatchTimeoutInMillis} parameter
+     is greater than 0.
+     @see ParallelConsumerOptions#getMinBatchTimeoutInMillis()
+     */
+    @Builder.Default
+    private final Integer minBatchSize = 1;
+
+    /**
+     The minimum time in milliseconds to wait before passing a batch of messages to the user functions, even if the
+     {@code minBatchSize} threshold has not been reached.
+     <p>
+     Note that this parameter only takes effect if it is greater than 0 and the {@code minBatchSize} parameter is greater
+     than 1.
+     @see ParallelConsumerOptions#getMinBatchSize()
+     */
+    @Builder.Default
+    private final Integer minBatchTimeoutInMillis = 0;
+
+    /**
      * Configure the amount of delay a record experiences, before a warning is logged.
      */
     @Builder.Default
@@ -378,6 +402,8 @@ public class ParallelConsumerOptions<K, V> {
     public boolean isUsingBatching() {
         return getBatchSize() > 1;
     }
+
+    public boolean isEnforceMinBatch() { return getMinBatchSize() > 1 && getMinBatchTimeoutInMillis() > 0; }
 
     @Builder.Default
     private final int maxFailureHistory = 10;
@@ -393,6 +419,23 @@ public class ParallelConsumerOptions<K, V> {
         Objects.requireNonNull(consumer, "A consumer must be supplied");
 
         transactionsValidation();
+        validateMinBatchParameters();
+    }
+
+    private void validateMinBatchParameters() {
+        if (isEnforceMinBatch()){
+            if (minBatchSize > batchSize)
+                throw new IllegalArgumentException(
+                        msg("minBatchSize cannot be bigger than batchSize: {} > {}",
+                    minBatchSize,
+                    batchSize));
+        }
+        if (minBatchTimeoutInMillis < 0){
+            throw new IllegalArgumentException(
+                    msg("minBatchTimeoutInMillis should be non negative: {}",
+                            minBatchTimeoutInMillis
+                    ));
+        }
     }
 
     private void transactionsValidation() {

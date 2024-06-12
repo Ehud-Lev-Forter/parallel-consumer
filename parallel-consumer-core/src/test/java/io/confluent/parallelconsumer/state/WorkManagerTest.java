@@ -1,7 +1,7 @@
 package io.confluent.parallelconsumer.state;
 
 /*-
- * Copyright (C) 2020-2022 Confluent, Inc.
+ * Copyright (C) 2020-2023 Confluent, Inc.
  */
 
 import com.google.common.truth.Truth;
@@ -30,7 +30,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.threeten.extra.MutableClock;
 import pl.tlinkowski.unij.api.UniLists;
@@ -39,12 +41,15 @@ import pl.tlinkowski.unij.api.UniMaps;
 import java.time.Duration;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static com.google.common.truth.Truth.assertWithMessage;
 import static io.confluent.parallelconsumer.ParallelConsumerOptions.ProcessingOrder.*;
 import static java.time.Duration.ofSeconds;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.testcontainers.shaded.org.yaml.snakeyaml.tokens.Token.ID.Key;
 import static pl.tlinkowski.unij.api.UniLists.of;
 
 /**
@@ -65,6 +70,9 @@ public class WorkManagerTest {
     int offset;
 
     PCModuleTestEnv module;
+
+    final static int minBatchSize = 5;
+    final static int maxBatchSize = 7;
 
     @BeforeEach
     public void setup() {
@@ -105,24 +113,30 @@ public class WorkManagerTest {
     }
 
     private void registerSomeWork() {
-        registerSomeWork(0);
+        registerSomeWork(0, 3, false);
     }
 
     /**
      * Adds 3 units of work
      */
-    private void registerSomeWork(int partition) {
+    private void registerSomeWork(int partition, int numberOfRecords, boolean randomKey) {
         assignPartition(partition);
 
-        String key = "key-0";
+        List<ConsumerRecord<String, String>> records  = IntStream.rangeClosed(1, numberOfRecords).boxed()
+                .map(i -> makeRec("" + i, getKey(randomKey), partition)).collect(Collectors.toList());
 
-        var rec0 = makeRec("0", key, partition);
-        var rec1 = makeRec("1", key, partition);
-        var rec2 = makeRec("2", key, partition);
         Map<TopicPartition, List<ConsumerRecord<String, String>>> m = new HashMap<>();
-        m.put(topicPartitionOf(partition), of(rec0, rec1, rec2));
+        m.put(topicPartitionOf(partition), records);
         var recs = new ConsumerRecords<>(m);
         wm.registerWork(new EpochAndRecordsMap(recs, wm.getPm()));
+    }
+
+    @NotNull
+    private static String getKey(boolean randomKey) {
+        String random = randomKey ? "-" + UUID.randomUUID() : "";
+
+        String key = "key-0" + random;
+        return key;
     }
 
     private ConsumerRecord<String, String> makeRec(String value, String key, int partition) {
@@ -224,6 +238,45 @@ public class WorkManagerTest {
                 .extracting(x -> (int) x.getCr().offset())
                 .isEqualTo(of(0, 2, 1));
     }
+
+
+    @ParameterizedTest
+    @MethodSource("workArgsProvider")
+    void minBatchSizeTest(int numberOfRecords, int expected, ParallelConsumerOptions.ProcessingOrder order,
+                          boolean isRandomKey) {
+        setupWorkManager(ParallelConsumerOptions.builder()
+                .ordering(order)
+                .minBatchTimeoutInMillis(100)
+                .minBatchSize(minBatchSize)
+                .batchSize(maxBatchSize)
+                .build());
+        //add first 3
+        registerSomeWork(0, numberOfRecords, isRandomKey);
+        var gottenWork = wm.getWorkIfAvailable();
+        assertThat(gottenWork).hasSize(expected);//not enough work
+
+    }
+
+    private static Stream<Arguments> workArgsProvider() {
+        return Stream.of(
+                Arguments.of(minBatchSize - 1, 0, UNORDERED, false),
+                Arguments.of(minBatchSize - 1, 0, KEY, false),
+                Arguments.of(minBatchSize - 1, 0, PARTITION, false),
+                Arguments.of(minBatchSize, minBatchSize, UNORDERED, false),
+                //Since in key and Partition there is no new data there will not be a new min batch
+                Arguments.of(minBatchSize, 0, KEY, false),
+                Arguments.of(minBatchSize, 0, PARTITION, false),
+                //When key is random we expect KEY to be the same as UNORDERED
+                Arguments.of(minBatchSize, minBatchSize, KEY, true),
+                Arguments.of(maxBatchSize + 1, maxBatchSize, UNORDERED, false),
+                Arguments.of(maxBatchSize + 1, maxBatchSize, KEY, true),
+                Arguments.of(maxBatchSize * 3 +1 , maxBatchSize * 3, UNORDERED, false),
+                Arguments.of(maxBatchSize * 3 +1 , maxBatchSize * 3, KEY, true),
+                Arguments.of(maxBatchSize + minBatchSize, maxBatchSize + minBatchSize, UNORDERED, false),
+                Arguments.of(maxBatchSize + minBatchSize, maxBatchSize + minBatchSize, KEY, true)
+        );
+    }
+
 
     private void succeed(WorkContainer<String, String> succeed) {
         succeed.onUserFunctionSuccess();
@@ -699,9 +752,9 @@ public class WorkManagerTest {
                 .ordering(PARTITION)
                 .build());
 
-        registerSomeWork(0);
-        registerSomeWork(1);
-        registerSomeWork(2);
+        registerSomeWork(0,3, false);
+        registerSomeWork(1,3, false);
+        registerSomeWork(2,3, false);
 
         var allWork = new ArrayList<WorkContainer<String, String>>();
 
